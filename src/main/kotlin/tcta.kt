@@ -32,13 +32,17 @@ class Analyzer(serverAddress: String, val buildTypeId: String) {
             println("Missing total build time")
             return
         }
-        val compilationTime = statistics["Compilation time, ms"]
         println("Total build time ${formatTime(totalBuildTime)}")
-        if (compilationTime != null) {
-            val compilationTimePercent = compilationTime.toDouble() / totalBuildTime.toDouble() * 100;
-            println("Compilation time ${formatTime(compilationTime)} (${compilationTimePercent} %)")
-        }
-        println("Test execution time ${formatTime(totalTestExecutionTime)}")
+
+        reportTime("Sources update time", statistics["buildStageDuration:sourcesUpdate"], totalBuildTime)
+        reportTime("Compilation time", statistics["Compilation time, ms"], totalBuildTime)
+        reportTime("Test execution time", totalTestExecutionTime, totalBuildTime)
+    }
+
+    fun reportTime(title: String, timeInMS: Int?, totalTimeInMS: Int) {
+        if (timeInMS == null) return
+        val percent = timeInMS.toDouble() / totalTimeInMS.toDouble() * 100;
+        println("${title} ${formatTime(timeInMS)} (${percent}%)")
     }
 
     fun formatTime(timeInMS: Int): String {
