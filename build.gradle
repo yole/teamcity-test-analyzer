@@ -19,5 +19,6 @@ repositories {
 dependencies {
     compile 'org.jetbrains.kotlin:kotlin-stdlib:0.9.66'
     compile 'com.squareup.retrofit:retrofit:1.8.0'
+    compile 'joda-time:joda-time:2.6'
     testCompile group: 'junit', name: 'junit', version: '4.11'
 }

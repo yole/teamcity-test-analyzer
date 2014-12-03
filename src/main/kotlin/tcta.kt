@@ -1,6 +1,11 @@
 package org.jetbrains.teamCityTestAnalyzer
 
 import retrofit.RestAdapter
+import retrofit.RetrofitError
+import java.util.HashMap
+import java.text.SimpleDateFormat
+import org.joda.time.Duration
+import org.joda.time.format.PeriodFormat
 
 class Analyzer(serverAddress: String, val buildTypeId: String) {
     val teamcity = RestAdapter.Builder()
@@ -18,7 +23,40 @@ class Analyzer(serverAddress: String, val buildTypeId: String) {
     }
 
     fun processBuild(build: Build) {
-        downloadBuildLog(build.id)
+        val testOccurrences = downloadTestOccurrences(build.id).sortDescendingBy { it.duration }
+        val statistics = downloadStatistics(build.id)
+        val totalTestExecutionTime = testOccurrences.fold(0, { (time, test) -> time + test.duration })
+        val testCount = testOccurrences.size
+        val totalBuildTime = statistics["BuildDuration"]
+        if (totalBuildTime == null) {
+            println("Missing total build time")
+            return
+        }
+        val compilationTime = statistics["Compilation time, ms"]
+        println("Total build time ${formatTime(totalBuildTime)}")
+        if (compilationTime != null) {
+            val compilationTimePercent = compilationTime.toDouble() / totalBuildTime.toDouble() * 100;
+            println("Compilation time ${formatTime(compilationTime)} (${compilationTimePercent} %)")
+        }
+        println("Test execution time ${formatTime(totalTestExecutionTime)}")
+    }
+
+    fun formatTime(timeInMS: Int): String {
+        val duration = Duration.millis(timeInMS.toLong())
+        return "${timeInMS} ms (" + PeriodFormat.getDefault().print(duration.toPeriod()) + ")"
+    }
+
+    fun downloadTestOccurrences(id: String): List<TestOccurrence> {
+        val locator = "count:30000,build:(id:${id})"
+        return teamcity.listTestOccurrences(locator).testOccurrence
+    }
+
+    fun downloadStatistics(id: String): Map<String, Int> {
+        val locator = "id:${id}"
+        val statistics = teamcity.listStatistics(locator).property
+        val result = HashMap<String, Int>()
+        statistics.forEach { result.put(it.name, it.value) }
+        return result
     }
 
     fun downloadBuildLog(id: String) {
@@ -28,7 +66,7 @@ class Analyzer(serverAddress: String, val buildTypeId: String) {
 }
 
 fun main(args: Array<String>) {
-    if (args.size() != 2) {
+    if (args.size != 2) {
         println("Usage: teamCityTestAnalyzer <server> <build type ID>")
         return
     }
