@@ -37,6 +37,7 @@ class Analyzer(serverAddress: String, val buildTypeId: String) {
         reportTime("Sources update time", statistics["buildStageDuration:sourcesUpdate"], totalBuildTime)
         reportTime("Compilation time", statistics["Compilation time, ms"], totalBuildTime)
         reportTime("Test execution time", totalTestExecutionTime, totalBuildTime)
+        reportTime("Artifacts publishing time", statistics["BuildArtifactsPublishingTime"], totalBuildTime)
     }
 
     fun reportTime(title: String, timeInMS: Int?, totalTimeInMS: Int) {
