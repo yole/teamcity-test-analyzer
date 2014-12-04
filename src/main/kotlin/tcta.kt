@@ -9,6 +9,9 @@ import org.joda.time.format.PeriodFormat
 import java.util.ArrayList
 import java.util.Formatter
 import java.util.TreeSet
+import retrofit.client.UrlConnectionClient
+import retrofit.client.Request
+import java.net.HttpURLConnection
 
 fun formatDuration(timeInMS: Int): String {
     val duration = Duration.millis(timeInMS.toLong())
@@ -71,7 +74,8 @@ class TimeDistribution(val name: String, val totalDuration: Int, val sampleCount
             Math.min(p1.minDuration, p2.minDuration), Math.max(p1.maxDuration, p2.maxDuration))
 }
 
-class BuildStatistics(val buildTimeDistribution: TimeDistribution,
+class BuildStatistics(val buildTypeName: String,
+                      val buildTimeDistribution: TimeDistribution,
                       val testTimeDistribution: TimeDistribution,
                       val testCount: Int,
                       val testOccurrences: List<TestOccurrence>) {
@@ -87,7 +91,10 @@ class BuildStatistics(val buildTimeDistribution: TimeDistribution,
 
     fun testExecutionTime() = buildTimeDistribution.getPhaseDuration("Test execution time")
 
-    fun suggestTestSplit(threshold: Int) {
+    fun suggestTestSplit() {
+        val testTime = testExecutionTime()
+        if (testTime == null || testCount == 0) return
+        val threshold = testTime / testCount
         val slowTestClasses = TreeSet<String>()
         var totalSlowTestTime: Int = 0
         var totalFastTestTime: Int = 0
@@ -143,22 +150,41 @@ class BuildStatistics(val buildTimeDistribution: TimeDistribution,
     }
 }
 
-class Analyzer(serverAddress: String, val buildTypeId: String) {
+class BuildTypeStatistics(val name: String,
+                          val aggregateBuildTimeDistribution: TimeDistribution,
+                          val aggregateTestTimeDistribution: TimeDistribution) {
+    fun report() {
+        println("---- Aggregate statistics for ${name} ---")
+        aggregateBuildTimeDistribution.report()
+        aggregateTestTimeDistribution.report()
+    }
+}
+
+class Analyzer(serverAddress: String) {
+    val client = object : UrlConnectionClient() {
+        override fun openConnection(request: Request?): HttpURLConnection? {
+            val result = super.openConnection(request)
+            result.setReadTimeout(60000)
+            return result
+        }
+    }
+
     val teamcity = RestAdapter.Builder()
             .setEndpoint(serverAddress)
+            .setClient(client)
             .build()
             .create(javaClass<TeamCityService>())
 
-    fun run() {
+    fun processBuildType(buildTypeId: String): BuildTypeStatistics? {
         val locator = "buildType:(id:${buildTypeId})"
 
         val buildList = teamcity.listBuilds(locator)
         val statistics = processBuild(buildList.build.first!!, true)
         if (statistics == null) {
-            return
+            return null
         }
         statistics.report()
-        statistics.suggestTestSplit(500)
+        statistics.suggestTestSplit()
         var aggregateBuildTimeDistribution = statistics.buildTimeDistribution
         var aggregateTestTimeDistribution = statistics.testTimeDistribution
         buildList.build.drop(1).take(5).forEach {
@@ -168,9 +194,8 @@ class Analyzer(serverAddress: String, val buildTypeId: String) {
                 aggregateTestTimeDistribution = aggregateTestTimeDistribution.merge(nextStatistics.testTimeDistribution)
             }
         }
-        println("---- Aggregate statistics ---")
-        aggregateBuildTimeDistribution.report()
-        aggregateTestTimeDistribution.report()
+        return BuildTypeStatistics(statistics.buildTypeName,
+                aggregateBuildTimeDistribution, aggregateTestTimeDistribution)
     }
 
     fun processBuild(build: Build, loadTestOccurrences: Boolean): BuildStatistics? {
@@ -201,7 +226,8 @@ class Analyzer(serverAddress: String, val buildTypeId: String) {
         testTimeDistribution.addPhase("Time of setUp()", statistics["ideaTests.totalSetupMs"])
         testTimeDistribution.addPhase("Time of tearDown()", statistics["ideaTests.totalTeardownMs"])
         testTimeDistribution.addPhase("Time of GC", statistics["ideaTests.gcTimeMs"])
-        return BuildStatistics(buildTimeDistribution, testTimeDistribution, testCount, testOccurrences)
+        return BuildStatistics(details.buildType.name, buildTimeDistribution, testTimeDistribution,
+                testCount, testOccurrences)
     }
 
     fun downloadTestOccurrences(id: String): List<TestOccurrence> {
@@ -234,14 +260,15 @@ class Analyzer(serverAddress: String, val buildTypeId: String) {
 }
 
 fun main(args: Array<String>) {
-    if (args.size != 2) {
-        println("Usage: teamCityTestAnalyzer <server> <build type ID>")
+    if (args.size < 2) {
+        println("Usage: teamCityTestAnalyzer <server> <build type ID>...")
         return
     }
     var serverAddress = args[0]
     if (!serverAddress.contains("://")) {
         serverAddress = "http://" + serverAddress
     }
-    val analyzer = Analyzer(serverAddress, args[1])
-    analyzer.run()
+    val analyzer = Analyzer(serverAddress)
+    val results = args.drop(1).map { analyzer.processBuildType(it) }
+    results.forEach { it?.report() }
 }

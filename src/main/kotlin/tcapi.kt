@@ -13,9 +13,11 @@ class BuildsPage(count: Int, nextHref: String?): Page(count, nextHref) {
     var build: List<Build> = ArrayList()
 }
 
+class BuildTypeSummary(val name: String)
+
 class TestOccurrencesSummary(val count: Int)
 
-class BuildDetails(val testOccurrences: TestOccurrencesSummary?)
+class BuildDetails(val buildType: BuildTypeSummary, val testOccurrences: TestOccurrencesSummary?)
 
 class Build(val id: String, val href: String)
 
