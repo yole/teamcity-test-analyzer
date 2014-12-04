@@ -9,9 +9,7 @@ import retrofit.http.Path
 
 open class Page(val count: Int, val nextHref: String?)
 
-class BuildsPage(count: Int, nextHref: String?): Page(count, nextHref) {
-    var build: List<Build> = ArrayList()
-}
+class BuildsPage(count: Int, nextHref: String?, val build: List<Build>): Page(count, nextHref)
 
 class BuildTypeSummary(val name: String, val projectName: String)
 
@@ -19,24 +17,19 @@ class TestOccurrencesSummary(val count: Int)
 
 class LastChange(val version: String)
 
-class LastChangesSummary(val count: Int) {
-    var change: List<LastChange> = ArrayList()
-}
+class LastChangesSummary(val count: Int, val change: List<LastChange>)
 
 class BuildDetails(val buildType: BuildTypeSummary, val testOccurrences: TestOccurrencesSummary?,
                    val lastChanges: LastChangesSummary)
 
 class Build(val id: String, val href: String)
 
-class TestOccurrencesPage(nextHref: String?, count: Int): Page(count, nextHref) {
-    var testOccurrence: List<TestOccurrence> = ArrayList()
-}
+class TestOccurrencesPage(nextHref: String?, count: Int, val testOccurrence: List<TestOccurrence>)
+    : Page(count, nextHref)
 
 class TestOccurrence(val id: String, val name: String, val duration: Int)
 
-class PropertyList() {
-    var property: List<Property> = ArrayList()
-}
+class PropertyList(val property: List<Property>)
 
 class Property(val name: String, val value: Int)
 

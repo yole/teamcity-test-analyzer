@@ -210,7 +210,10 @@ class Analyzer(serverAddress: String) {
         val locator = "buildType:(id:${buildTypeId}),running:false,personal:false"
 
         val buildList = teamcity.listBuilds(locator)
-        val statistics = processBuild(buildList.build.first!!, true)
+
+        val buildIt = buildList.build.listIterator()
+        val statistics = nextSuccessfulBuildStatistics(buildIt, suggestTestSplit)
+
         if (statistics == null) {
             return null
         }
@@ -221,30 +224,51 @@ class Analyzer(serverAddress: String) {
         }
         var aggregateBuildTimeDistribution = statistics.buildTimeDistribution
         var aggregateTestTimeDistribution = statistics.testTimeDistribution
-        buildList.build.drop(1).take(5).forEach {
-            val nextStatistics = processBuild(it, false)
-            if (nextStatistics != null && !nextStatistics.hasMissingPhases()) {
+
+        for (count in 0.rangeTo(5)) {
+            val nextStatistics = nextSuccessfulBuildStatistics(buildIt, false)
+            if (nextStatistics == null) {
+                break
+            }
+            if (!nextStatistics.hasMissingPhases()) {
                 aggregateBuildTimeDistribution = aggregateBuildTimeDistribution.merge(nextStatistics.buildTimeDistribution)
                 aggregateTestTimeDistribution = aggregateTestTimeDistribution.merge(nextStatistics.testTimeDistribution)
                 testCount = Math.max(testCount, nextStatistics.testCount)
             }
         }
+
         return BuildTypeStatistics(statistics.buildTypeName, testCount,
                 aggregateBuildTimeDistribution, aggregateTestTimeDistribution)
     }
 
+    private fun nextSuccessfulBuildStatistics(buildIt: ListIterator<Build>,
+                                              loadTestOccurrences: Boolean): BuildStatistics? {
+        while (buildIt.hasNext()) {
+            val statistics = processBuild(buildIt.next(), loadTestOccurrences)
+            if (statistics != null) {
+                return statistics
+            }
+        }
+        return null
+    }
+
     fun processBuild(build: Build, loadTestOccurrences: Boolean): BuildStatistics? {
+        println("Loading build ${build.id}")
+        val details = teamcity.loadBuildDetails("id:" + build.id)
+        val testOccurrencesSummary = details.testOccurrences
+        if (testOccurrencesSummary == null) {
+            return null
+        }
+
         val testOccurrences = if (loadTestOccurrences)
             downloadTestOccurrences(build.id).sortDescendingBy { it.duration }
         else
             listOf()
         val statistics = downloadStatistics(build.id)
-        val details = teamcity.loadBuildDetails("id:" + build.id)
         recordRevisionsCompiled(details.lastChanges.change)
         val totalTestExecutionTime = testOccurrences.fold(0, { (time, test) -> time + test.duration })
-        val testOccurrencesSummary = details.testOccurrences
         val totalBuildTime = statistics["BuildDuration"]
-        if (totalBuildTime == null || testOccurrencesSummary == null) {
+        if (totalBuildTime == null) {
             return null
         }
         val testCount = testOccurrencesSummary.count
