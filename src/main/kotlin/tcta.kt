@@ -193,7 +193,7 @@ class Analyzer(serverAddress: String) {
     val client = object : UrlConnectionClient() {
         override fun openConnection(request: Request?): HttpURLConnection? {
             val result = super.openConnection(request)
-            result.setReadTimeout(60000)
+            result.setReadTimeout(120000)
             return result
         }
     }
@@ -204,8 +204,10 @@ class Analyzer(serverAddress: String) {
             .build()
             .create(javaClass<TeamCityService>())
 
+    val revisionsCompiled = HashMap<String, Int>()
+
     fun processBuildType(buildTypeId: String, suggestTestSplit: Boolean): BuildTypeStatistics? {
-        val locator = "buildType:(id:${buildTypeId})"
+        val locator = "buildType:(id:${buildTypeId}),running:false,personal:false"
 
         val buildList = teamcity.listBuilds(locator)
         val statistics = processBuild(buildList.build.first!!, true)
@@ -238,6 +240,7 @@ class Analyzer(serverAddress: String) {
             listOf()
         val statistics = downloadStatistics(build.id)
         val details = teamcity.loadBuildDetails("id:" + build.id)
+        recordRevisionsCompiled(details.lastChanges.change)
         val totalTestExecutionTime = testOccurrences.fold(0, { (time, test) -> time + test.duration })
         val testOccurrencesSummary = details.testOccurrences
         val totalBuildTime = statistics["BuildDuration"]
@@ -269,6 +272,9 @@ class Analyzer(serverAddress: String) {
         val result = ArrayList<TestOccurrence>()
         while(true) {
             val page = teamcity.listTestOccurrences(locator + ",start:" + start)
+            if (page.count == 0) {
+                break
+            }
             result.addAll(page.testOccurrence)
             start += page.count
             if (page.nextHref == null) {
@@ -293,6 +299,21 @@ class Analyzer(serverAddress: String) {
         else
             buildType.projectName
         return projectName + " :: " + buildType.name
+    }
+
+    fun recordRevisionsCompiled(lastChanges: List<LastChange>) {
+        lastChanges.forEach {
+            val oldCount = revisionsCompiled.get(it.version) ?: 0
+            revisionsCompiled.put(it.version, oldCount + 1)
+        }
+    }
+
+    fun reportDuplicateCompilations() {
+        revisionsCompiled.forEach {
+            if (it.getValue() > 1) {
+                println("Revision ${it.key} compiled ${it.value} times")
+            }
+        }
     }
 }
 
@@ -328,4 +349,5 @@ fun main(args: Array<String>) {
     val results = args.drop(1).map { analyzer.processBuildType(it.trim("", "+"), it.endsWith("+")) }
     generateHtmlReport(results)
     results.forEach { it?.report() }
+    analyzer.reportDuplicateCompilations()
 }

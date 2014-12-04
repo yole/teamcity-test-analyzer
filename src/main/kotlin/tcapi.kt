@@ -17,7 +17,14 @@ class BuildTypeSummary(val name: String, val projectName: String)
 
 class TestOccurrencesSummary(val count: Int)
 
-class BuildDetails(val buildType: BuildTypeSummary, val testOccurrences: TestOccurrencesSummary?)
+class LastChange(val version: String)
+
+class LastChangesSummary(val count: Int) {
+    var change: List<LastChange> = ArrayList()
+}
+
+class BuildDetails(val buildType: BuildTypeSummary, val testOccurrences: TestOccurrencesSummary?,
+                   val lastChanges: LastChangesSummary)
 
 class Build(val id: String, val href: String)
 
