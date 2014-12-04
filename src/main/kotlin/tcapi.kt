@@ -9,9 +9,13 @@ import retrofit.http.Path
 
 open class Page(val count: Int, val nextHref: String?)
 
-class BuildPage(count: Int, nextHref: String?): Page(count, nextHref) {
+class BuildsPage(count: Int, nextHref: String?): Page(count, nextHref) {
     var build: List<Build> = ArrayList()
 }
+
+class TestOccurrencesSummary(val count: Int)
+
+class BuildDetails(val testOccurrences: TestOccurrencesSummary?)
 
 class Build(val id: String, val href: String)
 
@@ -30,7 +34,11 @@ class Property(val name: String, val value: Int)
 trait TeamCityService {
     GET("/guestAuth/app/rest/builds")
     Headers("Accept: application/json")
-    fun listBuilds(Query("locator") locator: String): BuildPage
+    fun listBuilds(Query("locator") locator: String): BuildsPage
+
+    GET("/guestAuth/app/rest/builds/{locator}")
+    Headers("Accept: application/json")
+    fun loadBuildDetails(Path("locator") locator: String): BuildDetails
 
     GET("/guestAuth/app/rest/testOccurrences")
     Headers("Accept: application/json")

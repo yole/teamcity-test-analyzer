@@ -15,8 +15,11 @@ fun formatDuration(timeInMS: Int): String {
     return "${timeInMS} ms (" + PeriodFormat.getDefault().print(duration.toPeriod()) + ")"
 }
 
-class TimeDistribution(val name: String, val totalDuration: Int) {
-    data class Phase(val name: String, val duration: Int)
+class TimeDistribution(val name: String, val totalDuration: Int, val sampleCount: Int = 1) {
+    data class Phase(val name: String,
+                     val duration: Int,
+                     val minDuration: Int = duration,
+                     val maxDuration: Int = duration)
 
     var unaccountedTime: Int = totalDuration
     val phases: MutableList<Phase> = ArrayList()
@@ -27,14 +30,19 @@ class TimeDistribution(val name: String, val totalDuration: Int) {
         unaccountedTime -= duration
     }
 
-    fun getPhaseDuration(name: String): Int? {
-        return phases.firstOrNull { it.name == name }?.duration
-    }
+    fun getPhaseDuration(name: String) = phases.firstOrNull { it.name == name }?.duration
 
     fun report() {
         println("${name} (total): ${formatDuration(totalDuration)}")
         phases.forEach {
-            reportTimePercent(it.name, it.duration)
+            if (sampleCount == 1) {
+                reportTimePercent(it.name, it.duration)
+            }
+            else {
+                reportTimePercent(it.name + " (average)", it.duration)
+                println("${it.name} (minimum): ${formatDuration(it.minDuration)}")
+                println("${it.name} (maximum): ${formatDuration(it.maxDuration)}")
+            }
         }
     }
 
@@ -46,21 +54,38 @@ class TimeDistribution(val name: String, val totalDuration: Int) {
         val percent = duration.toDouble() / totalDuration.toDouble() * 100;
         val builder = StringBuilder()
         val formatter = Formatter(builder)
-        formatter.format("%s %s (%.2f%%)", name, formatDuration(duration), percent)
+        formatter.format("%s %s (%.2f%%)", name, formatDuration(duration / sampleCount), percent)
         println(builder)
     }
+
+    fun merge(other: TimeDistribution): TimeDistribution {
+        val result = TimeDistribution(name, totalDuration + other.totalDuration, sampleCount + other.sampleCount)
+        phases.forEach { phase ->
+            val otherPhase = other.phases.firstOrNull { it.name == phase.name }
+            result.phases.add(if (otherPhase != null) mergePhase(phase, otherPhase) else phase)
+        }
+        return result
+    }
+
+    fun mergePhase(p1: Phase, p2: Phase): Phase = Phase(p1.name, p1.duration + p2.duration,
+            Math.min(p1.minDuration, p2.minDuration), Math.max(p1.maxDuration, p2.maxDuration))
 }
 
 class BuildStatistics(val buildTimeDistribution: TimeDistribution,
                       val testTimeDistribution: TimeDistribution,
-                      val avgTestDuration: Int,
+                      val testCount: Int,
                       val testOccurrences: List<TestOccurrence>) {
     fun report() {
         buildTimeDistribution.report()
         buildTimeDistribution.reportUnaccounted()
         testTimeDistribution.report()
-        println("Average time of test execution: ${avgTestDuration} ms")
+        val testTime = testExecutionTime()
+        if (testCount > 0 && testTime != null) {
+            println("Average time of test execution: ${testTime / testCount} ms")
+        }
     }
+
+    fun testExecutionTime() = buildTimeDistribution.getPhaseDuration("Test execution time")
 
     fun suggestTestSplit(threshold: Int) {
         val slowTestClasses = TreeSet<String>()
@@ -80,6 +105,7 @@ class BuildStatistics(val buildTimeDistribution: TimeDistribution,
                 fastTestCount++
             }
         }
+
         if (slowTestCount == 0) {
             println("All tests are faster than ${threshold}")
         }
@@ -94,7 +120,7 @@ class BuildStatistics(val buildTimeDistribution: TimeDistribution,
             println("Average duration of slow test: ${totalSlowTestTime/slowTestCount} ms")
             println("Average duration of fast test: ${totalFastTestTime/fastTestCount} ms")
 
-            val testDuration = buildTimeDistribution.getPhaseDuration("Test execution time")
+            val testDuration = testExecutionTime()
             if (testDuration != null) {
                 val timeWithoutTests = buildTimeDistribution.totalDuration - testDuration
                 println("Time of build with slow tests: ${formatDuration(timeWithoutTests + totalSlowTestTime)}")
@@ -127,38 +153,55 @@ class Analyzer(serverAddress: String, val buildTypeId: String) {
         val locator = "buildType:(id:${buildTypeId})"
 
         val buildList = teamcity.listBuilds(locator)
-        buildList.build.take(1).forEach {
-            val statistics = processBuild(it)
-            statistics?.report()
-            statistics?.suggestTestSplit(500)
+        val statistics = processBuild(buildList.build.first!!, true)
+        if (statistics == null) {
+            return
         }
+        statistics.report()
+        statistics.suggestTestSplit(500)
+        var aggregateBuildTimeDistribution = statistics.buildTimeDistribution
+        var aggregateTestTimeDistribution = statistics.testTimeDistribution
+        buildList.build.drop(1).take(5).forEach {
+            val nextStatistics = processBuild(it, false)
+            if (nextStatistics != null) {
+                aggregateBuildTimeDistribution = aggregateBuildTimeDistribution.merge(nextStatistics.buildTimeDistribution)
+                aggregateTestTimeDistribution = aggregateTestTimeDistribution.merge(nextStatistics.testTimeDistribution)
+            }
+        }
+        println("---- Aggregate statistics ---")
+        aggregateBuildTimeDistribution.report()
+        aggregateTestTimeDistribution.report()
     }
 
-    fun processBuild(build: Build): BuildStatistics? {
-        val testOccurrences = downloadTestOccurrences(build.id).sortDescendingBy { it.duration }
+    fun processBuild(build: Build, loadTestOccurrences: Boolean): BuildStatistics? {
+        val testOccurrences = if (loadTestOccurrences)
+            downloadTestOccurrences(build.id).sortDescendingBy { it.duration }
+        else
+            listOf()
         val statistics = downloadStatistics(build.id)
+        val details = teamcity.loadBuildDetails("id:" + build.id)
         val totalTestExecutionTime = testOccurrences.fold(0, { (time, test) -> time + test.duration })
-        val testCount = testOccurrences.size
+        val testOccurrencesSummary = details.testOccurrences
         val totalBuildTime = statistics["BuildDuration"]
-        if (totalBuildTime == null) {
+        if (totalBuildTime == null || testOccurrencesSummary == null) {
             return null
         }
-        val testExecutionTime = statistics["ideaTests.totalTimeMs"]
+        val testCount = testOccurrencesSummary.count
+        val testExecutionTime = statistics["ideaTests.totalTimeMs"] ?: totalTestExecutionTime
         val buildTimeDistribution = TimeDistribution("Build time", totalBuildTime)
         buildTimeDistribution.addPhase("Sources update time", statistics["buildStageDuration:sourcesUpdate"])
         buildTimeDistribution.addPhase("Compilation time", statistics["Compilation time, ms"])
         buildTimeDistribution.addPhase("Test execution time", testExecutionTime)
         buildTimeDistribution.addPhase("Artifacts publishing time", statistics["BuildArtifactsPublishingTime"])
 
-        val testTimeDistribution = TimeDistribution("Test execution time", testExecutionTime ?: totalTestExecutionTime)
-        if (testExecutionTime != null) {
+        val testTimeDistribution = TimeDistribution("Test execution time", testExecutionTime)
+        if (testExecutionTime > 0) {
             testTimeDistribution.addPhase("Time of individual test execution", totalTestExecutionTime)
         }
         testTimeDistribution.addPhase("Time of setUp()", statistics["ideaTests.totalSetupMs"])
         testTimeDistribution.addPhase("Time of tearDown()", statistics["ideaTests.totalTeardownMs"])
         testTimeDistribution.addPhase("Time of GC", statistics["ideaTests.gcTimeMs"])
-        val avgTestExecutionTime = if (testCount == 0) 0 else totalTestExecutionTime / testCount
-        return BuildStatistics(buildTimeDistribution, testTimeDistribution, avgTestExecutionTime, testOccurrences)
+        return BuildStatistics(buildTimeDistribution, testTimeDistribution, testCount, testOccurrences)
     }
 
     fun downloadTestOccurrences(id: String): List<TestOccurrence> {
