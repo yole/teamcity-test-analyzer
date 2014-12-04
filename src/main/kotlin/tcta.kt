@@ -12,10 +12,30 @@ import java.util.TreeSet
 import retrofit.client.UrlConnectionClient
 import retrofit.client.Request
 import java.net.HttpURLConnection
+import java.io.OutputStreamWriter
+import java.io.FileOutputStream
+import org.joda.time.format.PeriodFormatterBuilder
 
-fun formatDuration(timeInMS: Int): String {
+val SOURCES_UPDATE_PHASE = "Sources update time"
+val COMPILATION_PHASE = "Compilation time"
+val TEST_EXECUTION_PHASE = "Test execution time"
+val SETUP_PHASE = "Time of setUp()"
+val TEARDOWN_PHASE = "Time of tearDown()"
+val GC_PHASE = "Time of GC"
+
+val periodFormatter = PeriodFormatterBuilder().printZeroAlways()
+        .appendHours().appendLiteral(":")
+        .minimumPrintedDigits(2)
+        .appendMinutes().appendLiteral(":")
+        .appendSeconds().toFormatter()
+
+fun formatDuration(timeInMS: Int, includeExactTime: Boolean): String {
     val duration = Duration.millis(timeInMS.toLong())
-    return "${timeInMS} ms (" + PeriodFormat.getDefault().print(duration.toPeriod()) + ")"
+    val formattedTime = periodFormatter.print(duration.toPeriod())
+    if (!includeExactTime) {
+        return formattedTime
+    }
+    return "${timeInMS} ms (" + formattedTime + ")"
 }
 
 class TimeDistribution(val name: String, val totalDuration: Int, val sampleCount: Int = 1) {
@@ -26,9 +46,13 @@ class TimeDistribution(val name: String, val totalDuration: Int, val sampleCount
 
     var unaccountedTime: Int = totalDuration
     val phases: MutableList<Phase> = ArrayList()
+    var missingPhases = false
 
     fun addPhase(name: String, duration: Int?) {
-        if (duration == null) return
+        if (duration == null) {
+            missingPhases = true
+            return
+        }
         phases.add(Phase(name, duration))
         unaccountedTime -= duration
     }
@@ -36,30 +60,33 @@ class TimeDistribution(val name: String, val totalDuration: Int, val sampleCount
     fun getPhaseDuration(name: String) = phases.firstOrNull { it.name == name }?.duration
 
     fun report() {
-        println("${name} (total): ${formatDuration(totalDuration)}")
+        println("${name} (total): ${formatDuration(totalDuration, true)}")
         phases.forEach {
             if (sampleCount == 1) {
-                reportTimePercent(it.name, it.duration)
+                println("${it.name} ${formatPercentage(it.duration, true)}")
             }
             else {
-                reportTimePercent(it.name + " (average)", it.duration)
-                println("${it.name} (minimum): ${formatDuration(it.minDuration)}")
-                println("${it.name} (maximum): ${formatDuration(it.maxDuration)}")
+                println("${it.name} (average): ${formatPercentage(it.duration, true)}")
+                println("${it.name} (minimum): ${formatDuration(it.minDuration, true)}")
+                println("${it.name} (maximum): ${formatDuration(it.maxDuration, true)}")
             }
         }
     }
 
     fun reportUnaccounted() {
-        reportTimePercent("${name} (unaccounted)", unaccountedTime)
+        println("${name} (unaccounted) ${formatPercentage(unaccountedTime, false)}")
     }
 
-    private fun reportTimePercent(name: String, duration: Int) {
+    fun formatPercentage(duration: Int?, includeExactTime: Boolean): String {
+        if (duration == null) return "-"
         val percent = duration.toDouble() / totalDuration.toDouble() * 100;
         val builder = StringBuilder()
         val formatter = Formatter(builder)
-        formatter.format("%s %s (%.2f%%)", name, formatDuration(duration / sampleCount), percent)
-        println(builder)
+        formatter.format("%s (%.2f%%)", formatDuration(duration / sampleCount, includeExactTime), percent)
+        return builder.toString()
     }
+
+    fun formatPhaseDuration(name: String) = formatPercentage(getPhaseDuration(name), false)
 
     fun merge(other: TimeDistribution): TimeDistribution {
         val result = TimeDistribution(name, totalDuration + other.totalDuration, sampleCount + other.sampleCount)
@@ -89,7 +116,9 @@ class BuildStatistics(val buildTypeName: String,
         }
     }
 
-    fun testExecutionTime() = buildTimeDistribution.getPhaseDuration("Test execution time")
+    fun testExecutionTime() = buildTimeDistribution.getPhaseDuration(TEST_EXECUTION_PHASE)
+
+    fun hasMissingPhases() = buildTimeDistribution.missingPhases || testTimeDistribution.missingPhases
 
     fun suggestTestSplit() {
         val testTime = testExecutionTime()
@@ -122,16 +151,16 @@ class BuildStatistics(val buildTypeName: String,
         else {
             println("Slow test count: ${slowTestCount}")
             println("Fast test count: ${fastTestCount}")
-            println("Total duration of slow tests: ${formatDuration(totalSlowTestTime)}")
-            println("Total duration of fast tests: ${formatDuration(totalFastTestTime)}")
+            println("Total duration of slow tests: ${formatDuration(totalSlowTestTime, false)}")
+            println("Total duration of fast tests: ${formatDuration(totalFastTestTime, false)}")
             println("Average duration of slow test: ${totalSlowTestTime/slowTestCount} ms")
             println("Average duration of fast test: ${totalFastTestTime/fastTestCount} ms")
 
             val testDuration = testExecutionTime()
             if (testDuration != null) {
                 val timeWithoutTests = buildTimeDistribution.totalDuration - testDuration
-                println("Time of build with slow tests: ${formatDuration(timeWithoutTests + totalSlowTestTime)}")
-                println("Time of build with fast tests: ${formatDuration(timeWithoutTests + totalFastTestTime)}")
+                println("Time of build with slow tests: ${formatDuration(timeWithoutTests + totalSlowTestTime, false)}")
+                println("Time of build with fast tests: ${formatDuration(timeWithoutTests + totalFastTestTime, false)}")
             }
         }
     }
@@ -150,7 +179,7 @@ class BuildStatistics(val buildTypeName: String,
     }
 }
 
-class BuildTypeStatistics(val name: String,
+class BuildTypeStatistics(val name: String, val testCount: Int,
                           val aggregateBuildTimeDistribution: TimeDistribution,
                           val aggregateTestTimeDistribution: TimeDistribution) {
     fun report() {
@@ -175,7 +204,7 @@ class Analyzer(serverAddress: String) {
             .build()
             .create(javaClass<TeamCityService>())
 
-    fun processBuildType(buildTypeId: String): BuildTypeStatistics? {
+    fun processBuildType(buildTypeId: String, suggestTestSplit: Boolean): BuildTypeStatistics? {
         val locator = "buildType:(id:${buildTypeId})"
 
         val buildList = teamcity.listBuilds(locator)
@@ -183,18 +212,22 @@ class Analyzer(serverAddress: String) {
         if (statistics == null) {
             return null
         }
+        var testCount = statistics.testCount
         statistics.report()
-        statistics.suggestTestSplit()
+        if (suggestTestSplit) {
+            statistics.suggestTestSplit()
+        }
         var aggregateBuildTimeDistribution = statistics.buildTimeDistribution
         var aggregateTestTimeDistribution = statistics.testTimeDistribution
         buildList.build.drop(1).take(5).forEach {
             val nextStatistics = processBuild(it, false)
-            if (nextStatistics != null) {
+            if (nextStatistics != null && !nextStatistics.hasMissingPhases()) {
                 aggregateBuildTimeDistribution = aggregateBuildTimeDistribution.merge(nextStatistics.buildTimeDistribution)
                 aggregateTestTimeDistribution = aggregateTestTimeDistribution.merge(nextStatistics.testTimeDistribution)
+                testCount = Math.max(testCount, nextStatistics.testCount)
             }
         }
-        return BuildTypeStatistics(statistics.buildTypeName,
+        return BuildTypeStatistics(statistics.buildTypeName, testCount,
                 aggregateBuildTimeDistribution, aggregateTestTimeDistribution)
     }
 
@@ -214,8 +247,8 @@ class Analyzer(serverAddress: String) {
         val testCount = testOccurrencesSummary.count
         val testExecutionTime = statistics["ideaTests.totalTimeMs"] ?: totalTestExecutionTime
         val buildTimeDistribution = TimeDistribution("Build time", totalBuildTime)
-        buildTimeDistribution.addPhase("Sources update time", statistics["buildStageDuration:sourcesUpdate"])
-        buildTimeDistribution.addPhase("Compilation time", statistics["Compilation time, ms"])
+        buildTimeDistribution.addPhase(SOURCES_UPDATE_PHASE, statistics["buildStageDuration:sourcesUpdate"])
+        buildTimeDistribution.addPhase(COMPILATION_PHASE, statistics["Compilation time, ms"])
         buildTimeDistribution.addPhase("Test execution time", testExecutionTime)
         buildTimeDistribution.addPhase("Artifacts publishing time", statistics["BuildArtifactsPublishingTime"])
 
@@ -223,10 +256,10 @@ class Analyzer(serverAddress: String) {
         if (testExecutionTime > 0) {
             testTimeDistribution.addPhase("Time of individual test execution", totalTestExecutionTime)
         }
-        testTimeDistribution.addPhase("Time of setUp()", statistics["ideaTests.totalSetupMs"])
-        testTimeDistribution.addPhase("Time of tearDown()", statistics["ideaTests.totalTeardownMs"])
-        testTimeDistribution.addPhase("Time of GC", statistics["ideaTests.gcTimeMs"])
-        return BuildStatistics(details.buildType.name, buildTimeDistribution, testTimeDistribution,
+        testTimeDistribution.addPhase(SETUP_PHASE, statistics["ideaTests.totalSetupMs"])
+        testTimeDistribution.addPhase(TEARDOWN_PHASE, statistics["ideaTests.totalTeardownMs"])
+        testTimeDistribution.addPhase(GC_PHASE, statistics["ideaTests.gcTimeMs"])
+        return BuildStatistics(calculateBuildTypeName(details.buildType), buildTimeDistribution, testTimeDistribution,
                 testCount, testOccurrences)
     }
 
@@ -253,9 +286,32 @@ class Analyzer(serverAddress: String) {
         return result
     }
 
-    fun downloadBuildLog(id: String) {
-        val response = teamcity.downloadBuildLog(id)
-        println(response.getStatus())
+    fun calculateBuildTypeName(buildType: BuildTypeSummary): String {
+        val doubleColon = buildType.projectName.lastIndexOf("::");
+        val projectName = if (doubleColon > 0)
+            buildType.projectName.substring(doubleColon + 2).trim()
+        else
+            buildType.projectName
+        return projectName + " :: " + buildType.name
+    }
+}
+
+fun generateHtmlReport(results: List<BuildTypeStatistics?>) {
+    val f = OutputStreamWriter(FileOutputStream("report.html"))
+    try {
+        f.write("<table><thead><tr><td>Name</td><td>Tests</td><td>Update</td><td>Compile</td><td>setUp()</td><td>tearDown()</td><td>GC</td></tr></thead>")
+        results.filterNotNull().forEach {
+            f.write("<tr><td>${it.name}</td><td>${it.testCount}")
+            f.write("<td>${it.aggregateBuildTimeDistribution.formatPhaseDuration(SOURCES_UPDATE_PHASE)}</td>")
+            f.write("<td>${it.aggregateBuildTimeDistribution.formatPhaseDuration(COMPILATION_PHASE)}</td>")
+            f.write("<td>${it.aggregateTestTimeDistribution.formatPhaseDuration(SETUP_PHASE)}</td>")
+            f.write("<td>${it.aggregateTestTimeDistribution.formatPhaseDuration(TEARDOWN_PHASE)}</td>")
+            f.write("<td>${it.aggregateTestTimeDistribution.formatPhaseDuration(GC_PHASE)}</td>")
+            f.write("</tr>")
+        }
+        f.write("</table>")
+    } finally {
+        f.close()
     }
 }
 
@@ -269,6 +325,7 @@ fun main(args: Array<String>) {
         serverAddress = "http://" + serverAddress
     }
     val analyzer = Analyzer(serverAddress)
-    val results = args.drop(1).map { analyzer.processBuildType(it) }
+    val results = args.drop(1).map { analyzer.processBuildType(it.trim("", "+"), it.endsWith("+")) }
+    generateHtmlReport(results)
     results.forEach { it?.report() }
 }
