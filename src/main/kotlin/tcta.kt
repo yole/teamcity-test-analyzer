@@ -103,12 +103,15 @@ class TimeDistribution(val name: String, val totalDuration: Int, val sampleCount
 
 class BuildStatistics(val buildTypeName: String,
                       val buildTimeDistribution: TimeDistribution,
+                      val compilationTimeDistribution: TimeDistribution,
                       val testTimeDistribution: TimeDistribution,
                       val testCount: Int,
                       val testOccurrences: List<TestOccurrence>) {
     fun report() {
         buildTimeDistribution.report()
         buildTimeDistribution.reportUnaccounted()
+        compilationTimeDistribution.report()
+        compilationTimeDistribution.reportUnaccounted()
         testTimeDistribution.report()
         val testTime = testExecutionTime()
         if (testCount > 0 && testTime != null) {
@@ -181,10 +184,12 @@ class BuildStatistics(val buildTypeName: String,
 
 class BuildTypeStatistics(val name: String, val testCount: Int,
                           val aggregateBuildTimeDistribution: TimeDistribution,
+                          val aggregateCompilationTimeDistribution: TimeDistribution,
                           val aggregateTestTimeDistribution: TimeDistribution) {
     fun report() {
         println("---- Aggregate statistics for ${name} ---")
         aggregateBuildTimeDistribution.report()
+        aggregateCompilationTimeDistribution.report()
         aggregateTestTimeDistribution.report()
     }
 }
@@ -223,6 +228,7 @@ class Analyzer(serverAddress: String) {
             statistics.suggestTestSplit()
         }
         var aggregateBuildTimeDistribution = statistics.buildTimeDistribution
+        var aggregateCompilationTimeDistribution = statistics.compilationTimeDistribution
         var aggregateTestTimeDistribution = statistics.testTimeDistribution
 
         for (count in 0.rangeTo(5)) {
@@ -232,13 +238,16 @@ class Analyzer(serverAddress: String) {
             }
             if (!nextStatistics.hasMissingPhases()) {
                 aggregateBuildTimeDistribution = aggregateBuildTimeDistribution.merge(nextStatistics.buildTimeDistribution)
+                aggregateCompilationTimeDistribution = aggregateCompilationTimeDistribution.merge(nextStatistics.compilationTimeDistribution)
                 aggregateTestTimeDistribution = aggregateTestTimeDistribution.merge(nextStatistics.testTimeDistribution)
                 testCount = Math.max(testCount, nextStatistics.testCount)
             }
         }
 
         return BuildTypeStatistics(statistics.buildTypeName, testCount,
-                aggregateBuildTimeDistribution, aggregateTestTimeDistribution)
+                aggregateBuildTimeDistribution,
+                aggregateCompilationTimeDistribution,
+                aggregateTestTimeDistribution)
     }
 
     private fun nextSuccessfulBuildStatistics(buildIt: ListIterator<Build>,
@@ -268,16 +277,25 @@ class Analyzer(serverAddress: String) {
         recordRevisionsCompiled(details.lastChanges.change)
         val totalTestExecutionTime = testOccurrences.fold(0, { (time, test) -> time + test.duration })
         val totalBuildTime = statistics["BuildDuration"]
-        if (totalBuildTime == null) {
+        val compilationTime = statistics["Compilation time, ms"]
+        if (totalBuildTime == null || compilationTime == null) {
             return null
         }
         val testCount = testOccurrencesSummary.count
         val testExecutionTime = statistics["ideaTests.totalTimeMs"] ?: totalTestExecutionTime
         val buildTimeDistribution = TimeDistribution("Build time", totalBuildTime)
         buildTimeDistribution.addPhase(SOURCES_UPDATE_PHASE, statistics["buildStageDuration:sourcesUpdate"])
-        buildTimeDistribution.addPhase(COMPILATION_PHASE, statistics["Compilation time, ms"])
+        buildTimeDistribution.addPhase(COMPILATION_PHASE, compilationTime)
         buildTimeDistribution.addPhase("Test execution time", testExecutionTime)
         buildTimeDistribution.addPhase("Artifacts publishing time", statistics["BuildArtifactsPublishingTime"])
+
+        val compilationTimeDistribution = TimeDistribution("Compilation time", compilationTime)
+        statistics.forEach {
+            if (it.key.startsWith("Compilation time '")) {
+                val compilerName = extractCompilerName(it.key)
+                compilationTimeDistribution.addPhase(compilerName, it.value)
+            }
+        }
 
         val testTimeDistribution = TimeDistribution("Test execution time", testExecutionTime)
         if (testExecutionTime > 0) {
@@ -286,7 +304,8 @@ class Analyzer(serverAddress: String) {
         testTimeDistribution.addPhase(SETUP_PHASE, statistics["ideaTests.totalSetupMs"])
         testTimeDistribution.addPhase(TEARDOWN_PHASE, statistics["ideaTests.totalTeardownMs"])
         testTimeDistribution.addPhase(GC_PHASE, statistics["ideaTests.gcTimeMs"])
-        return BuildStatistics(calculateBuildTypeName(details.buildType), buildTimeDistribution, testTimeDistribution,
+        return BuildStatistics(calculateBuildTypeName(details.buildType),
+                buildTimeDistribution, compilationTimeDistribution, testTimeDistribution,
                 testCount, testOccurrences)
     }
 
@@ -325,6 +344,15 @@ class Analyzer(serverAddress: String) {
         return projectName + " :: " + buildType.name
     }
 
+    fun extractCompilerName(statisticName: String): String {
+        val suffix = statisticName.substring("Compilation time '".size)
+        val apos = suffix.indexOf('\'')
+        if (apos >= 0) {
+            return suffix.substring(0, apos)
+        }
+        return suffix
+    }
+
     fun recordRevisionsCompiled(lastChanges: List<LastChange>) {
         lastChanges.forEach {
             val oldCount = revisionsCompiled.get(it.version) ?: 0
@@ -344,7 +372,10 @@ class Analyzer(serverAddress: String) {
 fun generateHtmlReport(results: List<BuildTypeStatistics?>) {
     val f = OutputStreamWriter(FileOutputStream("report.html"))
     try {
-        f.write("<table><thead><tr><td>Name</td><td>Tests</td><td>Update</td><td>Compile</td><td>setUp()</td><td>tearDown()</td><td>GC</td></tr></thead>")
+        f.write("<table><thead><tr><td>Name</td><td>Tests</td><td>Update</td><td>Compile</td>" +
+                "<td>setUp()</td><td>tearDown()</td><td>GC</td>" +
+                "<td>Java</td><td>Resources</td><td>Groovy</td><td>Groovy stubs</td>" +
+                "</tr></thead>")
         results.filterNotNull().forEach {
             f.write("<tr><td>${it.name}</td><td>${it.testCount}")
             f.write("<td>${it.aggregateBuildTimeDistribution.formatPhaseDuration(SOURCES_UPDATE_PHASE)}</td>")
@@ -352,6 +383,10 @@ fun generateHtmlReport(results: List<BuildTypeStatistics?>) {
             f.write("<td>${it.aggregateTestTimeDistribution.formatPhaseDuration(SETUP_PHASE)}</td>")
             f.write("<td>${it.aggregateTestTimeDistribution.formatPhaseDuration(TEARDOWN_PHASE)}</td>")
             f.write("<td>${it.aggregateTestTimeDistribution.formatPhaseDuration(GC_PHASE)}</td>")
+            f.write("<td>${it.aggregateCompilationTimeDistribution.formatPhaseDuration("java")}</td>")
+            f.write("<td>${it.aggregateCompilationTimeDistribution.formatPhaseDuration("Resource Compiler")}</td>")
+            f.write("<td>${it.aggregateCompilationTimeDistribution.formatPhaseDuration("Groovy compiler")}</td>")
+            f.write("<td>${it.aggregateCompilationTimeDistribution.formatPhaseDuration("Groovy stub generator")}</td>")
             f.write("</tr>")
         }
         f.write("</table>")
